@@ -5,7 +5,8 @@ requests
 google-generativeai
 sentence-transformers
 faiss-cpu
-python-multipart
-pydantic
 transformers
 torch
+pymupdf
+python-docx
+python-multipart
