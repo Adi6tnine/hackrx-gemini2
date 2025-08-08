@@ -1,0 +1,122 @@
+You are an expert backend engineer and prompt-to-code generator specializing in LLM + retrieval systems. 
+Build a complete minimal but production-minded submission for the HackRx 6.0 challenge that satisfies the problem statement and API docs provided below.
+
+**Goal (deliverable)**:
+A working FastAPI service exposing the endpoint `POST /api/v1/hackrx/run` that:
+- Accepts a JSON payload with `documents` (public PDF/DOCX/blob URL or list) and `questions` (list of natural language questions).
+- Downloads/parses the document(s), converts text into chunks, creates embeddings, stores them in a FAISS index (in-memory is OK).
+- For each question, retrieves top relevant chunks, does clause-level matching, evaluates simple logic/decision rules, and returns a structured JSON response with:
+  - `answers`: list of human-readable answers
+  - `sources`: which document chunk(s) were used (doc name + chunk id + excerpt)
+  - `explainability`: short trace showing clause matches, similarity scores, and logic outcome
+- Implements Bearer token authentication using the team token provided in env (default token is the one in the prompt).
+- Has minimal but clear unit test(s) that exercise the endpoint using the sample document URL and sample questions in the docs.
+- Is documented: README with setup, run & test instructions + sample `curl`.
+
+**Constraints & evaluation targets**:
+- Emphasize: Accuracy, Token efficiency (limit context passed to LLM), Latency (avoid unnecessary repeated API calls), Reusability (modular code), and Explainability.
+- Use environment variables for API keys and token; do NOT hardcode secrets except the default team token for local testing if necessary.
+
+**Required tech choices** (use these unless you explicitly explain alternative):
+- FastAPI for backend
+- Uvicorn for run
+- PyMuPDF (fitz) or pdfplumber for PDF parsing (prefer PyMuPDF)
+- LangChain for text splitting & pipeline glue (optional; ok to implement own splitting)
+- OpenAI embeddings + OpenAI chat/completion model (use env var `OPENAI_API_KEY`)
+- FAISS (in-memory) for vector retrieval
+- PostgreSQL optional for metadata (can stub out with simple dict for MVP)
+- Python 3.10+; create `requirements.txt`
+
+**Project structure (deliver)**:
+- `app/main.py` — FastAPI app with `/api/v1/hackrx/run`
+- `app/core/ingest.py` — document download & parsing, chunking
+- `app/core/embeddings.py` — embedding generation, FAISS index management
+- `app/core/retriever.py` — retrieval & clause-matching logic
+- `app/core/llm.py` — LLM query formatting & call (use minimal prompt/template to reduce tokens)
+- `app/schemas.py` — pydantic models for request & response
+- `tests/test_api.py` — pytest tests that call the endpoint with sample payload
+- `.env.template` — show required env keys: OPENAI_API_KEY, TEAM_TOKEN (defaults to token in prompt)
+- `requirements.txt`
+- `README.md` — run, test, and sample curl instructions
+
+**Design details & logic:**
+1. **Auth**: Use Bearer auth header, compare to `TEAM_TOKEN` env var. Respond 401 if missing/wrong.
+2. **Document ingestion**:
+   - Accept single string URL or list. Download via `requests`.
+   - For PDF: extract text pages via PyMuPDF into plain text; for DOCX: use `python-docx` (optional).
+   - Clean text, remove repeated whitespace.
+3. **Chunking**:
+   - Use a smart splitter (approx 400–600 tokens per chunk) with sentence boundary awareness.
+   - Maintain chunk metadata: `doc_id`, `page_range`, `chunk_id`, `text_excerpt`.
+4. **Embeddings & FAISS**:
+   - Create embeddings per chunk using OpenAI embeddings (or local HF if user wants).
+   - Build FAISS index and store mapping from index -> metadata dict.
+   - Persist index to disk (optional) for faster dev cycles.
+5. **Clause Matching**:
+   - For each retrieved chunk, run a lightweight semantic matching step:
+     - compute cosine similarity and identify key clauses via regex heuristics (e.g., "waiting period", "grace period", "maternity", "%", days/months/years).
+     - If clause keywords present, flag them and include snippet in `explainability`.
+6. **LLM call**:
+   - Compose a compact prompt template:
+     - System: You are an assistant that answers policy queries using only provided context chunks. If uncertain, say "Information not found in the provided documents."
+     - User: include the question + top N retrieved chunks concatenated (limit total tokens — do truncation).
+   - Request an answer that is:
+     - concise
+     - includes a JSON-like explanation (e.g., `{"answer": "...", "sources": [...], "confidence": "low|medium|high"}`)
+   - Parse LLM output safely and construct the final structured response.
+   - Use gpt-4 if available, else gpt-3.5-turbo.
+7. **Output format** (exact sample shape):
+{
+  "answers": [
+    {
+      "question": "<original question>",
+      "answer": "<human readable answer>",
+      "sources": [
+         {"doc": "<doc name>", "chunk_id": 3, "excerpt": "..." }
+      ],
+      "explainability": {
+         "clause_matches": [{"clause": "waiting period", "score": 0.87}],
+         "similarity_scores": [0.91, 0.86],
+         "logic": "matched waiting period -> 36 months rule applied"
+      }
+    }, ...
+  ]
+}
+8. **Token efficiency**:
+   - Before sending to LLM, dedupe similar chunks, and only send top-k (k=3–5) with combined size <= 2500 tokens (or equivalent).
+   - Compress when necessary: include chunk summaries instead of full text if long.
+9. **Testing**:
+   - Use the sample PDF blob link and the sample question list included below to run integration test that asserts that answers array has same length as questions and that at least 50% of answers are non-empty.
+10. **Provide sample curl**:
+   - POST to `http://localhost:8000/api/v1/hackrx/run` with Authorization header `Bearer <TEAM_TOKEN>` and JSON payload containing `documents` and `questions`.
+11. **Logging & error handling**:
+   - Return 400 on malformed requests, 500 with clear message on internal exceptions.
+12. **Explainability & scoring hooks**:
+   - Add a simple scoring hook to compute per-question score using similarity thresholds (this will help map to their scoring doc). Return an extra `score_estimate` field per question.
+
+**Use this sample input in tests (from problem statement)**:
+documents: `"https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"`
+questions: [
+  "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
+  "What is the waiting period for pre-existing diseases (PED) to be covered?",
+  "Does this policy cover maternity expenses, and what are the conditions?",
+  "What is the waiting period for cataract surgery?",
+  "Are the medical expenses for an organ donor covered under this policy?",
+  "What is the No Claim Discount (NCD) offered in this policy?",
+  "Is there a benefit for preventive health check-ups?",
+  "How does the policy define a 'Hospital'?",
+  "What is the extent of coverage for AYUSH treatments?",
+  "Are there any sub-limits on room rent and ICU charges for Plan A?"
+]
+
+**Environment variables (.env.template)**:
+OPENAI_API_KEY=
+TEAM_TOKEN=954e06e1c53324def16260167cb6a51f3a144221af5afb0faa6ca9bd2c836641
+
+**Deliver code and also:**
+- A README with instructions to `pip install -r requirements.txt`, set `.env`, `uvicorn app.main:app --reload`, and the sample curl to test.
+- A short note in README listing known limitations and next steps (multilingual, Pinecone persistence, fine-tuning).
+
+**Important**: Prefer clarity, modularity, and explainability in the code. Add helpful docstrings and comments. Keep the LLM prompts minimal and safe. If external API usage might cost money, make that clear in README and provide a mocked-local mode fallback that returns dummy embeddings + canned LLM responses so tests run without real OpenAI keys.
+
+Now produce the full project files exactly as requested (code for each file, requirements.txt, .env.template, README, and tests). Keep code runnable locally and well-commented.
